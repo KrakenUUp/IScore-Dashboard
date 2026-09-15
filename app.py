@@ -27,7 +27,6 @@ def process_iscore_file(file):
         
         date_val = "Unknown Date"
         opp_val = "Opponent"
-        game_num = "Game 1"
         header_idx = None
 
         # Scan top 10 rows for metadata & locate stat header row
