@@ -3,12 +3,14 @@ import pandas as pd
 import plotly.express as px
 
 st.set_page_config(page_title="iScore Stats Tracker", layout="wide")
-st.title("⚾ iScore Player Performance Dashboard")
+st.title("⚾ Caribe Performance Dashboard")
 
-uploaded_file = st.file_uploader("Upload iScore Game Log CSV", type=["csv"])
+# NEW CODE (Multi-file upload)
+uploaded_files = st.file_uploader("Upload iScore Game Log CSVs", type=["csv"], accept_multiple_files=True)
 
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
+if uploaded_files:
+    # Combines all uploaded CSVs into one master season table
+    df = pd.concat([pd.read_csv(file) for file in uploaded_files], ignore_index=True)
     cols = df.columns.tolist()
     
     player_col_guess = next((c for c in cols if 'player' in c.lower() or 'name' in c.lower()), cols[0])
