@@ -75,6 +75,55 @@ def parse_iscore_date(date_str):
         return pd.Timestamp(0)
 
 
+def normalize_player_name(name):
+    """
+    Normalizes player names to group variations together (e.g. 'John', 'John Smith', 'John #10')
+    by extracting the primary first name or base identifier, while allowing manual overrides.
+    """
+    if not isinstance(name, str):
+        return "Unknown"
+    
+    cleaned = name.strip()
+    if not cleaned:
+        return "Unknown"
+        
+    # Remove jersey numbers like '#10' or '(10)'
+    cleaned = re.sub(r'#\d+|\(\d+\)', '', cleaned).strip()
+    
+    return cleaned
+
+
+def resolve_unified_player_name(df, player_col):
+    """
+    Creates a standardized canonical player name column to merge variations 
+    (e.g., 'John' in early games and 'John Smith' in later games).
+    """
+    raw_names = df[player_col].dropna().unique().tolist()
+    
+    # Group names that share a starting token (e.g. First Name)
+    mapping = {}
+    for name in raw_names:
+        norm = normalize_player_name(name)
+        # Find if a shorter or base name already exists
+        matched_canonical = None
+        for canonical in mapping.values():
+            # If one is a prefix of the other (e.g. "John" vs "John Smith")
+            if norm.lower().startswith(canonical.lower()) or canonical.lower().startswith(norm.lower()):
+                # Pick the longer / more descriptive name as the canonical name
+                if len(norm) >= len(canonical):
+                    matched_canonical = norm
+                else:
+                    matched_canonical = canonical
+                break
+        
+        if not matched_canonical:
+            mapping[name] = norm
+        else:
+            mapping[name] = matched_canonical
+            
+    return df[player_col].map(mapping).fillna(df[player_col])
+
+
 def process_caribe_file(file):
     dfs_from_this_file = []
 
@@ -96,7 +145,6 @@ def process_caribe_file(file):
     # Extract date
     date_match = re.search(r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', header_text)
     if not date_match:
-        # Try looking for 6-digit MMDDYY sequences in the header text
         six_digit_match = re.search(r'\b(\d{6})\b', header_text)
         if six_digit_match:
             raw_d = six_digit_match.group(1)
@@ -163,23 +211,30 @@ if uploaded_files:
     st.sidebar.header("Controls")
     player_col = st.sidebar.selectbox("Player / Row Column", cols, index=cols.index(player_col_guess) if player_col_guess in cols else 0)
     
+    # Apply player name unification to merge variations (e.g., 'John' -> 'John Smith')
+    canonical_player_col = player_col + "_Canonical"
+    df[canonical_player_col] = resolve_unified_player_name(df, player_col)
+    
     # Toggle between Individual Players or Team Totals
     view_mode = st.sidebar.radio("View Mode", ["Individual Players", "Team Totals Row"])
     
     if view_mode == "Team Totals Row":
         filtered_df = df[df[player_col].astype(str).str.upper().str.contains("TOTAL|TOTALS", na=False)]
+        active_player_col = player_col
     else:
         filtered_df = df[~df[player_col].astype(str).str.upper().str.contains("TOTAL|TOTALS", na=False)]
-        players = filtered_df[player_col].dropna().unique().tolist()
+        active_player_col = canonical_player_col
+        
+        players = filtered_df[active_player_col].dropna().unique().tolist()
         selected_players = st.sidebar.multiselect("Select Player(s)", players, default=players[:1] if players else [])
-        filtered_df = filtered_df[filtered_df[player_col].isin(selected_players)]
+        filtered_df = filtered_df[filtered_df[active_player_col].isin(selected_players)]
 
     numeric_cols = filtered_df.select_dtypes(include=['float64', 'int64']).columns.tolist()
     selected_metrics = st.sidebar.multiselect("Select Metrics", numeric_cols, default=numeric_cols[:2] if numeric_cols else [])
 
     if not filtered_df.empty and selected_metrics:
         melted_df = filtered_df.melt(
-            id_vars=['Game_Label', player_col], 
+            id_vars=['Game_Label', active_player_col], 
             value_vars=selected_metrics, 
             var_name="Category", 
             value_name="Stat Value"
@@ -192,7 +247,7 @@ if uploaded_files:
             melted_df, 
             x='Game_Label', 
             y="Stat Value", 
-            color=player_col, 
+            color=active_player_col, 
             facet_row="Category",
             markers=True, 
             height=270 * len(selected_metrics),
@@ -213,4 +268,4 @@ if uploaded_files:
         
         fig.update_yaxes(matches=None)
         st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(filtered_df[['Game_Label', player_col] + selected_metrics])
+        st.dataframe(filtered_df[['Game_Label', active_player_col] + selected_metrics])
