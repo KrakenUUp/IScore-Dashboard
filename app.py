@@ -129,7 +129,7 @@ def process_caribe_file(file):
                 break
 
         file.seek(0)
-        df = pd.read_excel(file, sheet_name=sheet, header=header_idx if header_idx is not None else 0) if sheet else pd.read_csv(file, header=header_idx if header_idx is not None else 0)
+        df = pd.read_excel(file, sheet_name=sheet, header=header_idx if header_idx is not None else 0) if sheet else pd.read_csv(file, sheet_name=header_idx if header_idx is not None else 0)
         
         df = df.dropna(how='all')
         if not df.empty:
@@ -147,7 +147,6 @@ def process_caribe_file(file):
     return pd.DataFrame()
 
 
-# UI Rendering
 uploaded_files = st.file_uploader("Upload iScore Game Files", type=["csv", "xls", "xlsx"], accept_multiple_files=True)
 
 if uploaded_files:
@@ -199,6 +198,19 @@ if uploaded_files:
             height=270 * len(selected_metrics),
             category_orders={'Game_Label': game_order}
         )
+        
+        # Connect data points with visible lines & ensure legends display all selected items
+        fig.update_traces(
+            mode="lines+markers",
+            connectgaps=True,
+            showlegend=True
+        )
+        
+        # Customize hover template to show clean, concise details (Name, Date/Game, and Value)
+        fig.update_traces(
+            hovertemplate="<b>%{fullData.name}</b><br>Game: %{x}<br>Value: %{y}<extra></extra>"
+        )
+        
         fig.update_yaxes(matches=None)
         st.plotly_chart(fig, use_container_width=True)
         st.dataframe(filtered_df[['Game_Label', player_col] + selected_metrics])
