@@ -6,62 +6,80 @@ import re
 st.set_page_config(page_title="iScore Stats Tracker", layout="wide")
 st.title("⚾ Caribe Performance Dashboard")
 
-# 1. EXTRACTOR FUNCTION (Defined inside app.py)
+# 1. EXTRACTOR FUNCTION (Scans ALL sheets inside Excel files)
 def process_iscore_file(file):
-    # Read raw file with no headers to inspect top metadata rows
-    if file.name.endswith(('.xls', '.xlsx')):
-        raw_df = pd.read_excel(file, header=None)
-    else:
-        raw_df = pd.read_csv(file, header=None)
-    
-    date_val = "Unknown Date"
-    opp_val = "Opponent"
-    game_num = "Game 1"
-    header_idx = None
+    dfs_from_this_file = []
 
-    # Scan top 10 rows for metadata & locate real stat header row
-    for idx, row in raw_df.iloc[:10].iterrows():
-        row_str = " ".join(row.dropna().astype(str))
+    # Check if the file is Excel (.xls or .xlsx)
+    if file.name.endswith(('.xls', '.xlsx')):
+        excel_file = pd.ExcelFile(file)
+        sheet_names = excel_file.sheet_names  # Gets ALL tabs (e.g., Visitor Batting, Home Batting, Pitching)
+    else:
+        sheet_names = [None] # CSVs only have one sheet
+
+    for sheet in sheet_names:
+        # Read raw sheet with no headers to inspect metadata
+        file.seek(0)
+        if sheet:
+            raw_df = pd.read_excel(file, sheet_name=sheet, header=None)
+        else:
+            raw_df = pd.read_csv(file, header=None)
         
-        # Extract Date
-        date_match = re.search(r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', row_str)
-        if date_match and date_val == "Unknown Date":
-            date_val = date_match.group(1)
+        date_val = "Unknown Date"
+        opp_val = "Opponent"
+        game_num = "Game 1"
+        header_idx = None
+
+        # Scan top 10 rows for metadata & locate stat header row
+        for idx, row in raw_df.iloc[:10].iterrows():
+            row_str = " ".join(row.dropna().astype(str))
             
-        # Extract Opponent
-        if " vs " in row_str.lower() or " at " in row_str.lower() or "opponent:" in row_str.lower():
-            opp_val = row_str
-            
-        # Extract Game Number
-        game_match = re.search(r'game\s*#?\s*(\d+)', row_str, re.IGNORECASE)
-        if game_match:
-            game_num = f"Game {game_match.group(1)}"
+            # Extract Date
+            date_match = re.search(r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', row_str)
+            if date_match and date_val == "Unknown Date":
+                date_val = date_match.group(1)
+                
+            # Extract Opponent
+            if " vs " in row_str.lower() or " at " in row_str.lower() or "opponent:" in row_str.lower():
+                opp_val = row_str
+                
+            # Extract Game Number
+            game_match = re.search(r'game\s*#?\s*(\d+)', row_str, re.IGNORECASE)
+            if game_match:
+                game_num = f"Game {game_match.group(1)}"
 
-        # Find row where player stats table begins
-        row_values_lower = row.dropna().astype(str).str.lower().tolist()
-        if any(term in row_values_lower for term in ['player', 'name', 'batting']):
-            header_idx = idx
-            break
+            # Find row where player stats table starts
+            row_values_lower = row.dropna().astype(str).str.lower().tolist()
+            if any(term in row_values_lower for term in ['player', 'name', 'batting', 'pitching']):
+                header_idx = idx
+                break
 
-    # Re-read file starting at the detected stat table header
-    file.seek(0)
-    if file.name.endswith(('.xls', '.xlsx')):
-        df = pd.read_excel(file, header=header_idx if header_idx is not None else 0)
-    else:
-        df = pd.read_csv(file, header=header_idx if header_idx is not None else 0)
+        # Re-read specific sheet starting at detected stat header
+        file.seek(0)
+        if sheet:
+            df = pd.read_excel(file, sheet_name=sheet, header=header_idx if header_idx is not None else 0)
+        else:
+            df = pd.read_csv(file, header=header_idx if header_idx is not None else 0)
 
-    # Clean empty rows & team totals
-    df = df.dropna(how='all')
-    first_col = df.columns[0]
-    df = df[~df[first_col].astype(str).str.upper().str.contains("TOTAL|TEAM", na=False)]
+        # Clean empty rows & team totals
+        df = df.dropna(how='all')
+        if not df.empty:
+            first_col = df.columns[0]
+            df = df[~df[first_col].astype(str).str.upper().str.contains("TOTAL|TEAM", na=False)]
 
-    # Attach extracted metadata columns
-    df['Extracted_Date'] = date_val
-    df['Extracted_Opponent'] = opp_val
-    df['Extracted_Game'] = game_num
-    df['Game_Label'] = f"{date_val} ({game_num}) vs {opp_val}"
+            # Attach extracted metadata and sheet context
+            df['Extracted_Date'] = date_val
+            df['Extracted_Opponent'] = opp_val
+            df['Extracted_Game'] = game_num
+            df['Sheet_Type'] = sheet if sheet else "CSV"
+            df['Game_Label'] = f"{date_val} ({game_num}) vs {opp_val}"
 
-    return df
+            dfs_from_this_file.append(df)
+
+    # Combine all sheets from this single file
+    if dfs_from_this_file:
+        return pd.concat(dfs_from_this_file, ignore_index=True)
+    return pd.DataFrame()
 
 
 # 2. DASHBOARD FRONTEND & FILE UPLOADER
@@ -72,7 +90,7 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    # Process and merge all uploaded files using the function above
+    # Process and merge all uploaded files across ALL tabs
     all_dfs = [process_iscore_file(f) for f in uploaded_files]
     df = pd.concat(all_dfs, ignore_index=True)
     
@@ -82,6 +100,13 @@ if uploaded_files:
     player_col_guess = next((c for c in cols if 'player' in c.lower() or 'name' in c.lower()), cols[0])
     
     st.sidebar.header("Controls")
+    
+    # Filter by Sheet Type if multiple tabs exist (e.g. Home Batting vs Pitching)
+    if 'Sheet_Type' in cols and len(df['Sheet_Type'].unique()) > 1:
+        sheets_available = df['Sheet_Type'].unique().tolist()
+        selected_sheets = st.sidebar.multiselect("Filter Stat Types (Sheets)", sheets_available, default=sheets_available)
+        df = df[df['Sheet_Type'].isin(selected_sheets)]
+
     player_col = st.sidebar.selectbox("Player Column", cols, index=cols.index(player_col_guess))
     
     # Select Players
@@ -103,7 +128,7 @@ if uploaded_files:
             value_name="Stat Value"
         )
         
-        # Generate chart using extracted Game_Label (Date + Game# + Opponent)
+        # Generate chart
         fig = px.line(
             melted_df, 
             x='Game_Label', 
@@ -121,6 +146,6 @@ if uploaded_files:
         
         # Show data table
         st.subheader("📊 Match Log & Stats")
-        st.dataframe(filtered_df[['Game_Label', player_col] + selected_metrics])
+        st.dataframe(filtered_df[['Game_Label', 'Sheet_Type', player_col] + selected_metrics])
     else:
         st.info("Please select at least one player and one category.")
