@@ -36,6 +36,45 @@ def parse_caribe_role(text_string):
     return "Visitor", "Opponent"
 
 
+def parse_iscore_date(date_str):
+    """
+    Robustly parses iScore date formats, specifically handling 6-digit MMDDYY (e.g. '051224')
+    and standard date strings to return a true datetime object for correct chronological sorting.
+    """
+    if not date_str:
+        return pd.Timestamp(0)
+    
+    cleaned = re.sub(r'[^0-9]', '', str(date_str))
+    
+    # Handle iScore MMDDYY format (6 digits)
+    if len(cleaned) == 6:
+        mm = int(cleaned[0:2])
+        dd = int(cleaned[2:4])
+        yy = int(cleaned[4:6])
+        full_year = yy + 2000
+        try:
+            return pd.Timestamp(year=full_year, month=mm, day=dd)
+        except ValueError:
+            pass
+            
+    # Handle MMDDYYYY format (8 digits)
+    elif len(cleaned) == 8:
+        mm = int(cleaned[0:2])
+        dd = int(cleaned[2:4])
+        yyyy = int(cleaned[4:8])
+        try:
+            return pd.Timestamp(year=yyyy, month=mm, day=dd)
+        except ValueError:
+            pass
+
+    # Fallback to standard pandas datetime parser
+    try:
+        dt = pd.to_datetime(date_str)
+        return dt if not pd.isna(dt) else pd.Timestamp(0)
+    except Exception:
+        return pd.Timestamp(0)
+
+
 def process_caribe_file(file):
     dfs_from_this_file = []
 
@@ -56,7 +95,18 @@ def process_caribe_file(file):
     
     # Extract date
     date_match = re.search(r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', header_text)
-    date_val = date_match.group(1) if date_match else "Unknown Date"
+    if not date_match:
+        # Try looking for 6-digit MMDDYY sequences in the header text
+        six_digit_match = re.search(r'\b(\d{6})\b', header_text)
+        if six_digit_match:
+            raw_d = six_digit_match.group(1)
+            date_val = f"{raw_d[0:2]}/{raw_d[2:4]}/{raw_d[4:6]}"
+        else:
+            date_val = "Unknown Date"
+    else:
+        date_val = date_match.group(1)
+        
+    parsed_dt = parse_iscore_date(date_val)
     game_label = f"{date_val} vs {opponent_name} ({caribe_role})"
 
     for sheet in sheet_names:
@@ -86,6 +136,7 @@ def process_caribe_file(file):
             df['Caribe_Role'] = caribe_role
             df['Opponent'] = opponent_name
             df['Game_Date'] = date_val
+            df['__Parsed_Date'] = parsed_dt
             df['Game_Label'] = game_label
             df['Stat_Category'] = sheet if sheet else "Stats"
             
@@ -103,11 +154,15 @@ if uploaded_files:
     all_dfs = [process_caribe_file(f) for f in uploaded_files]
     df = pd.concat(all_dfs, ignore_index=True)
     
-    cols = df.columns.tolist()
+    # CRITICAL SORT FIX: Sort entire dataframe chronologically by true parsed datetime timestamp
+    if '__Parsed_Date' in df.columns:
+        df = df.sort_values(by=['__Parsed_Date', 'Game_Label'])
+    
+    cols = [c for c in df.columns if not c.startswith('__')]
     player_col_guess = next((c for c in cols if 'player' in c.lower() or 'name' in c.lower()), cols[0])
     
     st.sidebar.header("Controls")
-    player_col = st.sidebar.selectbox("Player / Row Column", cols, index=cols.index(player_col_guess))
+    player_col = st.sidebar.selectbox("Player / Row Column", cols, index=cols.index(player_col_guess) if player_col_guess in cols else 0)
     
     # Toggle between Individual Players or Team Totals
     view_mode = st.sidebar.radio("View Mode", ["Individual Players", "Team Totals Row"])
@@ -131,6 +186,9 @@ if uploaded_files:
             value_name="Stat Value"
         )
         
+        # Enforce chronological ordering of the categorical Game_Label axis in Plotly
+        game_order = filtered_df['Game_Label'].unique().tolist()
+        
         fig = px.line(
             melted_df, 
             x='Game_Label', 
@@ -138,7 +196,8 @@ if uploaded_files:
             color=player_col, 
             facet_row="Category",
             markers=True, 
-            height=270 * len(selected_metrics)
+            height=270 * len(selected_metrics),
+            category_orders={'Game_Label': game_order}
         )
         fig.update_yaxes(matches=None)
         st.plotly_chart(fig, use_container_width=True)
