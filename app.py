@@ -4,7 +4,7 @@ import plotly.express as px
 import re
 
 st.set_page_config(page_title="iScore Stats Tracker", layout="wide")
-st.title("⚾ Caribe Performance Dashboard")
+st.title("⚾ iScore Player Performance Dashboard")
 
 # 1. EXTRACTOR FUNCTION (Scans ALL sheets inside Excel files)
 def process_iscore_file(file):
@@ -27,6 +27,7 @@ def process_iscore_file(file):
         
         date_val = "Unknown Date"
         opp_val = "Opponent"
+        game_num = "Game 1"
         header_idx = None
 
         # Scan top 10 rows for metadata & locate stat header row
