@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import re
+import os
+import glob
 
 st.set_page_config(page_title="Caribe Stats Tracker", layout="wide")
 st.title("⚾ Caribe Performance Dashboard")
@@ -78,7 +80,7 @@ def parse_iscore_date(date_str):
 def normalize_player_name(name):
     """
     Normalizes player names to group variations together (e.g. 'John', 'John Smith', 'John #10')
-    by extracting the primary first name or base identifier, while allowing manual overrides.
+    by extracting the primary first name or base identifier.
     """
     if not isinstance(name, str):
         return "Unknown"
@@ -95,21 +97,17 @@ def normalize_player_name(name):
 
 def resolve_unified_player_name(df, player_col):
     """
-    Creates a standardized canonical player name column to merge variations 
-    (e.g., 'John' in early games and 'John Smith' in later games).
+    Creates a standardized canonical player name column to merge name variations 
+    across games (e.g., 'John' in early games and 'John Smith' in later games).
     """
     raw_names = df[player_col].dropna().unique().tolist()
     
-    # Group names that share a starting token (e.g. First Name)
     mapping = {}
     for name in raw_names:
         norm = normalize_player_name(name)
-        # Find if a shorter or base name already exists
         matched_canonical = None
         for canonical in mapping.values():
-            # If one is a prefix of the other (e.g. "John" vs "John Smith")
             if norm.lower().startswith(canonical.lower()) or canonical.lower().startswith(norm.lower()):
-                # Pick the longer / more descriptive name as the canonical name
                 if len(norm) >= len(canonical):
                     matched_canonical = norm
                 else:
@@ -124,81 +122,102 @@ def resolve_unified_player_name(df, player_col):
     return df[player_col].map(mapping).fillna(df[player_col])
 
 
-def process_caribe_file(file):
+def process_caribe_file(file_obj, filename_hint):
     dfs_from_this_file = []
 
-    if file.name.endswith(('.xls', '.xlsx')):
-        excel_file = pd.ExcelFile(file)
-        sheet_names = excel_file.sheet_names
-    else:
-        sheet_names = [None]
-
-    # First pass: determine Caribe's role (Visitor vs Home) from headers
-    file.seek(0)
-    raw_sample = pd.read_excel(file, sheet_name=0, header=None) if sheet_names[0] else pd.read_csv(file, header=None)
-    
-    header_text = " ".join(raw_sample.iloc[:5].fillna('').astype(str).values.flatten())
-    game_title = file.name if "caribe" not in header_text.lower() else header_text
-    
-    caribe_role, opponent_name = parse_caribe_role(game_title)
-    
-    # Extract date
-    date_match = re.search(r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', header_text)
-    if not date_match:
-        six_digit_match = re.search(r'\b(\d{6})\b', header_text)
-        if six_digit_match:
-            raw_d = six_digit_match.group(1)
-            date_val = f"{raw_d[0:2]}/{raw_d[2:4]}/{raw_d[4:6]}"
+    try:
+        if filename_hint.endswith(('.xls', '.xlsx')):
+            excel_file = pd.ExcelFile(file_obj)
+            sheet_names = excel_file.sheet_names
         else:
-            date_val = "Unknown Date"
-    else:
-        date_val = date_match.group(1)
-        
-    parsed_dt = parse_iscore_date(date_val)
-    game_label = f"{date_val} vs {opponent_name} ({caribe_role})"
+            sheet_names = [None]
 
-    for sheet in sheet_names:
-        # Filter ONLY the sheets belonging to Caribe
-        if sheet:
-            if caribe_role == "Visitor" and not sheet.lower().startswith("visitor"):
-                continue
-            if caribe_role == "Home" and not sheet.lower().startswith("home"):
-                continue
-
-        file.seek(0)
-        raw_df = pd.read_excel(file, sheet_name=sheet, header=None) if sheet else pd.read_csv(file, header=None)
+        # First pass: determine Caribe's role from headers
+        if hasattr(file_obj, 'seek'):
+            file_obj.seek(0)
+        raw_sample = pd.read_excel(file_obj, sheet_name=0, header=None) if sheet_names[0] else pd.read_csv(file_obj, header=None)
         
-        # Locate stat table header row
-        header_idx = None
-        for idx, row in raw_df.iloc[:10].iterrows():
-            row_vals = row.dropna().astype(str).str.lower().tolist()
-            if any(term in row_vals for term in ['player', 'name', 'batting', 'pitching', 'tot', 'total']):
-                header_idx = idx
-                break
-
-        file.seek(0)
-        df = pd.read_excel(file, sheet_name=sheet, header=header_idx if header_idx is not None else 0) if sheet else pd.read_csv(file, sheet_name=header_idx if header_idx is not None else 0)
+        header_text = " ".join(raw_sample.iloc[:5].fillna('').astype(str).values.flatten())
+        game_title = filename_hint if "caribe" not in header_text.lower() else header_text
         
-        df = df.dropna(how='all')
-        if not df.empty:
-            df['Caribe_Role'] = caribe_role
-            df['Opponent'] = opponent_name
-            df['Game_Date'] = date_val
-            df['__Parsed_Date'] = parsed_dt
-            df['Game_Label'] = game_label
-            df['Stat_Category'] = sheet if sheet else "Stats"
+        caribe_role, opponent_name = parse_caribe_role(game_title)
+        
+        # Extract date
+        date_match = re.search(r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})', header_text)
+        if not date_match:
+            six_digit_match = re.search(r'\b(\d{6})\b', header_text)
+            if six_digit_match:
+                raw_d = six_digit_match.group(1)
+                date_val = f"{raw_d[0:2]}/{raw_d[2:4]}/{raw_d[4:6]}"
+            else:
+                date_val = "Unknown Date"
+        else:
+            date_val = date_match.group(1)
             
-            dfs_from_this_file.append(df)
+        parsed_dt = parse_iscore_date(date_val)
+        game_label = f"{date_val} vs {opponent_name} ({caribe_role})"
+
+        for sheet in sheet_names:
+            if sheet:
+                if caribe_role == "Visitor" and not sheet.lower().startswith("visitor"):
+                    continue
+                if caribe_role == "Home" and not sheet.lower().startswith("home"):
+                    continue
+
+            if hasattr(file_obj, 'seek'):
+                file_obj.seek(0)
+            df = pd.read_excel(file_obj, sheet_name=sheet, header=None) if sheet else pd.read_csv(file_obj, header=None)
+            
+            header_idx = None
+            for idx, row in df.iloc[:10].iterrows():
+                row_vals = row.dropna().astype(str).str.lower().tolist()
+                if any(term in row_vals for term in ['player', 'name', 'batting', 'pitching', 'tot', 'total']):
+                    header_idx = idx
+                    break
+
+            if hasattr(file_obj, 'seek'):
+                file_obj.seek(0)
+            df = pd.read_excel(file_obj, sheet_name=sheet, header=header_idx if header_idx is not None else 0) if sheet else pd.read_csv(file_obj, sheet_name=header_idx if header_idx is not None else 0)
+            
+            df = df.dropna(how='all')
+            if not df.empty:
+                df['Caribe_Role'] = caribe_role
+                df['Opponent'] = opponent_name
+                df['Game_Date'] = date_val
+                df['__Parsed_Date'] = parsed_dt
+                df['Game_Label'] = game_label
+                df['Stat_Category'] = sheet if sheet else "Stats"
+                
+                dfs_from_this_file.append(df)
+    except Exception as e:
+        st.sidebar.warning(f"Could not parse {filename_hint}: {e}")
 
     if dfs_from_this_file:
         return pd.concat(dfs_from_this_file, ignore_index=True)
     return pd.DataFrame()
 
 
-uploaded_files = st.file_uploader("Upload iScore Game Files", type=["csv", "xls", "xlsx"], accept_multiple_files=True)
+all_dfs = []
 
+# 1. Automatically check local 'data' folder for files committed to GitHub
+data_dir = "data"
+if os.path.exists(data_dir) and os.path.isdir(data_dir):
+    data_files = glob.glob(os.path.join(data_dir, "*.xls*")) + glob.glob(os.path.join(data_dir, "*.csv"))
+    for f_path in data_files:
+        res_df = process_caribe_file(f_path, os.path.basename(f_path))
+        if not res_df.empty:
+            all_dfs.append(res_df)
+
+# 2. Allow manual file uploads as backup or supplement
+uploaded_files = st.sidebar.file_uploader("Upload iScore Game Files (Optional)", type=["csv", "xls", "xlsx"], accept_multiple_files=True)
 if uploaded_files:
-    all_dfs = [process_caribe_file(f) for f in uploaded_files]
+    for file in uploaded_files:
+        res_df = process_caribe_file(file, file.name)
+        if not res_df.empty:
+            all_dfs.append(res_df)
+
+
+if all_dfs:
     df = pd.concat(all_dfs, ignore_index=True)
     
     # CRITICAL SORT FIX: Sort entire dataframe chronologically by true parsed datetime timestamp
@@ -211,11 +230,10 @@ if uploaded_files:
     st.sidebar.header("Controls")
     player_col = st.sidebar.selectbox("Player / Row Column", cols, index=cols.index(player_col_guess) if player_col_guess in cols else 0)
     
-    # Apply player name unification to merge variations (e.g., 'John' -> 'John Smith')
+    # Apply player name unification to merge name variations
     canonical_player_col = player_col + "_Canonical"
     df[canonical_player_col] = resolve_unified_player_name(df, player_col)
     
-    # Toggle between Individual Players or Team Totals
     view_mode = st.sidebar.radio("View Mode", ["Individual Players", "Team Totals Row"])
     
     if view_mode == "Team Totals Row":
@@ -226,7 +244,7 @@ if uploaded_files:
         active_player_col = canonical_player_col
         
         players = filtered_df[active_player_col].dropna().unique().tolist()
-        selected_players = st.sidebar.multiselect("Select Player(s)", players, default=players[:1] if players else [])
+        selected_players = st.sidebar.multiselect("Select Player(s)", players, default=players[:3] if players else [])
         filtered_df = filtered_df[filtered_df[active_player_col].isin(selected_players)]
 
     numeric_cols = filtered_df.select_dtypes(include=['float64', 'int64']).columns.tolist()
@@ -240,7 +258,6 @@ if uploaded_files:
             value_name="Stat Value"
         )
         
-        # Enforce chronological ordering of the categorical Game_Label axis in Plotly
         game_order = filtered_df['Game_Label'].unique().tolist()
         
         fig = px.line(
@@ -254,14 +271,12 @@ if uploaded_files:
             category_orders={'Game_Label': game_order}
         )
         
-        # Connect data points with visible lines & ensure legends display all selected items
         fig.update_traces(
             mode="lines+markers",
             connectgaps=True,
             showlegend=True
         )
         
-        # Customize hover template to show clean, concise details (Name, Date/Game, and Value)
         fig.update_traces(
             hovertemplate="<b>%{fullData.name}</b><br>Game: %{x}<br>Value: %{y}<extra></extra>"
         )
@@ -269,3 +284,7 @@ if uploaded_files:
         fig.update_yaxes(matches=None)
         st.plotly_chart(fig, use_container_width=True)
         st.dataframe(filtered_df[['Game_Label', active_player_col] + selected_metrics])
+    else:
+        st.info("Please select at least one player and metric from the sidebar.")
+else:
+    st.info("👋 Welcome! No files found. Please either upload files using the sidebar uploader or commit your `.xls`, `.xlsx`, or `.csv` files inside a folder named `data/` in your GitHub repository.")
